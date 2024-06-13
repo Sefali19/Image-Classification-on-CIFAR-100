@@ -9,22 +9,38 @@ Original file is located at
 
 import torch
 import torchvision
-import numpy as np
 import matplotlib.pyplot as plt
 import torch.nn as nn
-import torch.nn.functional as F
 from torchvision.datasets import CIFAR100
 from torchvision.transforms import ToTensor
-from torchvision.utils import make_grid
 from torch.utils.data.dataloader import DataLoader
-from torch.utils.data import random_split
 from torchvision import transforms
+import PIL
+from torch import nn
 
-transform = transforms.Compose([transforms.ToTensor(),
-                                transforms.Normalize((0.5,0.5,0.5), (0.5,0.5,0.5))])
+# Create training transform with TrivialAugment
+train_transform_trivial_augment = transforms.Compose([
+    transforms.Resize((64, 64)),
+    transforms.TrivialAugmentWide(num_magnitude_bins=31),
+    transforms.ToTensor(),
+    transforms.ColorJitter(hue=.05, saturation=.05),
+    transforms.RandomHorizontalFlip(),
+    transforms.RandomRotation(20),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+])
 
-dataset = CIFAR100(root='data/', download=True, transform=transform)
-test_dataset = CIFAR100(root='data/', train=False, transform=transform)
+# Create testing transform (no data augmentation)
+test_transform = transforms.Compose([
+    transforms.Resize((64, 64)),
+    transforms.ToTensor(),
+    torchvision.transforms.ColorJitter(hue=.05, saturation=.05),
+    torchvision.transforms.RandomHorizontalFlip(),
+    torchvision.transforms.RandomRotation(20),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+])
+
+dataset = CIFAR100(root='data/', download=True, transform=train_transform_trivial_augment)
+test_dataset = CIFAR100(root='data/', train=False, transform=test_transform)
 
 
 print(dataset)
@@ -39,19 +55,13 @@ print(classes)
 #     class_count[label] += 1
 # class_count
 
-torch.manual_seed(43)
-val_size = 10000
-train_size = len(dataset) - val_size
-train_ds, val_ds = random_split(dataset, [train_size, val_size])
-len(train_ds), len(val_ds)
-
-image, label = train_ds[0]
+image, label = dataset[0]
 print(f"Image shape: {image.shape}")
 plt.imshow(image.squeeze().permute(1,2,0)) # image shape is [3, 32, 32] (colour channels, height, width)
 plt.title(label);
 
 # See first training sample
-image, label = train_ds[0]
+image, label = dataset[0]
 image, label
 
 image.shape
@@ -61,36 +71,33 @@ torch.manual_seed(42)
 fig = plt.figure(figsize=(9, 9))
 rows, cols = 4, 4
 for i in range(1, rows * cols + 1):
-    random_idx = torch.randint(0, len(train_ds), size=[1]).item()
-    img, label = train_ds[random_idx]
+    random_idx = torch.randint(0, len(dataset), size=[1]).item()
+    img, label = dataset[random_idx]
     fig.add_subplot(rows, cols, i)
     plt.imshow(img.squeeze().permute(1,2,0), cmap="gray")
     plt.title(classes[label])
     plt.axis(False);
 
-from torch.utils.data import DataLoader
-
-# Setup the batch size hyperparameter
+# Turn Datasets into DataLoader's
+import os
 BATCH_SIZE = 32
+NUM_WORKERS = os.cpu_count()
 
-# Turn datasets into iterables (batches)
-train_dataloader = DataLoader(train_ds, # dataset to turn into iterable
-    batch_size=BATCH_SIZE, # how many samples per batch?
-    shuffle=True # shuffle data every epoch?
-)
+torch.manual_seed(42)
+train_dataloader_augmented = DataLoader(dataset,
+                                        batch_size=BATCH_SIZE,
+                                        shuffle=True,
+                                        num_workers=NUM_WORKERS)
 
-test_dataloader = DataLoader(test_dataset,
-    batch_size=BATCH_SIZE,
-    shuffle=False # don't necessarily have to shuffle the testing data
-)
+test_dataloader_simple = DataLoader(test_dataset,
+                                    batch_size=BATCH_SIZE,
+                                    shuffle=False,
+                                    num_workers=NUM_WORKERS)
 
-# Let's check out what we've created
-print(f"Dataloaders: {train_dataloader, test_dataloader}")
-print(f"Length of train dataloader: {len(train_dataloader)} batches of {BATCH_SIZE}")
-print(f"Length of test dataloader: {len(test_dataloader)} batches of {BATCH_SIZE}")
+train_dataloader_augmented, test_dataloader_simple
 
 # Check out what's inside the training dataloader
-train_features_batch, train_labels_batch = next(iter(train_dataloader))
+train_features_batch, train_labels_batch = next(iter(train_dataloader_augmented))
 train_features_batch.shape, train_labels_batch.shape
 
 # Show a sample
@@ -136,92 +143,24 @@ else:
 # Import accuracy metric
 from helper_functions import accuracy_fn # Note: could also use torchmetrics.Accuracy(task = 'multiclass', num_classes=len(class_names)).to(device)
 
-# Setup loss function and optimizer
-# loss_fn = nn.CrossEntropyLoss() # this is also called "criterion"/"cost function" in some places
-# optimizer = torch.optim.SGD(params=model_2.parameters(), lr=0.1)
-
 # Setup device agnostic code
 import torch
 device = "cuda" if torch.cuda.is_available() else "cpu"
 device
 
-def train_step(model: torch.nn.Module,
-               data_loader: torch.utils.data.DataLoader,
-               loss_fn: torch.nn.Module,
-               optimizer: torch.optim.Optimizer,
-               accuracy_fn,
-               device: torch.device = device):
-    train_loss, train_acc = 0, 0
-    model.to(device)
-    for batch, (X, y) in enumerate(data_loader):
-        # Send data to GPU
-        X, y = X.to(device), y.to(device)
-
-        # 1. Forward pass
-        y_pred = model(X)
-
-        # 2. Calculate loss
-        loss = loss_fn(y_pred, y)
-        train_loss += loss
-        train_acc += accuracy_fn(y_true=y,
-                                 y_pred=y_pred.argmax(dim=1)) # Go from logits -> pred labels
-
-        # 3. Optimizer zero grad
-        optimizer.zero_grad()
-
-        # 4. Loss backward
-        loss.backward()
-
-        # 5. Optimizer step
-        optimizer.step()
-
-    # Calculate loss and accuracy per epoch and print out what's happening
-    train_loss /= len(data_loader)
-    train_acc /= len(data_loader)
-    print(f"Train loss: {train_loss:.5f} | Train accuracy: {train_acc:.2f}%")
-
-def test_step(data_loader: torch.utils.data.DataLoader,
-              model: torch.nn.Module,
-              loss_fn: torch.nn.Module,
-              accuracy_fn,
-              device: torch.device = device):
-    test_loss, test_acc = 0, 0
-    model.to(device)
-    model.eval() # put model in eval mode
-    # Turn on inference context manager
-    with torch.inference_mode():
-        for X, y in data_loader:
-            # Send data to GPU
-            X, y = X.to(device), y.to(device)
-
-            # 1. Forward pass
-            test_pred = model(X)
-
-            # 2. Calculate loss and accuracy
-            test_loss += loss_fn(test_pred, y)
-            test_acc += accuracy_fn(y_true=y,
-                y_pred=test_pred.argmax(dim=1) # Go from logits -> pred labels
-            )
-
-        # Adjust metrics and print out
-        test_loss /= len(data_loader)
-        test_acc /= len(data_loader)
-        print(f"Test loss: {test_loss:.5f} | Test accuracy: {test_acc:.2f}%\n")
-
-# Create a convolutional neural network
-class Cifar100Model(nn.Module):
+class CIFAR100_TinyVGG(nn.Module):
     """
     Model architecture copying TinyVGG from:
     https://poloclub.github.io/cnn-explainer/
     """
-    def __init__(self, input_shape: int, hidden_units: int, output_shape: int):
+    def __init__(self, input_shape: int, hidden_units: int, output_shape: int) -> None:
         super().__init__()
-        self.block_1 = nn.Sequential(
+        self.conv_block_1 = nn.Sequential(
             nn.Conv2d(in_channels=input_shape,
                       out_channels=hidden_units,
                       kernel_size=3, # how big is the square that's going over the image?
                       stride=1, # default
-                      padding=1),# options = "valid" (no padding) or "same" (output has same shape as input) or int for specific number
+                      padding=1), # options = "valid" (no padding) or "same" (output has same shape as input) or int for specific number
             nn.ReLU(),
             nn.Conv2d(in_channels=hidden_units,
                       out_channels=hidden_units,
@@ -232,26 +171,10 @@ class Cifar100Model(nn.Module):
             nn.MaxPool2d(kernel_size=2,
                          stride=2) # default stride value is same as kernel_size
         )
-        self.block_2 = nn.Sequential(
-            nn.Conv2d(hidden_units, hidden_units, 3, padding=1),
+        self.conv_block_2 = nn.Sequential(
+            nn.Conv2d(hidden_units, hidden_units, kernel_size=3,stride=1, padding=1),
             nn.ReLU(),
-            nn.Conv2d(hidden_units, hidden_units, 3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(2)
-        )
-
-        self.block_3 = nn.Sequential(
-            nn.Conv2d(hidden_units, hidden_units, 3, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(hidden_units, hidden_units, 3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(2)
-        )
-
-        self.block_4 = nn.Sequential(
-            nn.Conv2d(hidden_units, hidden_units, 3, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(hidden_units, hidden_units, 3, padding=1),
+            nn.Conv2d(hidden_units, hidden_units, kernel_size=3,stride=1, padding=1),
             nn.ReLU(),
             nn.MaxPool2d(2)
         )
@@ -260,132 +183,168 @@ class Cifar100Model(nn.Module):
             nn.Flatten(),
             # Where did this in_features shape come from?
             # It's because each layer of our network compresses and changes the shape of our inputs data.
-            nn.Linear(in_features=hidden_units*8*8,
+            nn.Linear(in_features=hidden_units*16*16,
                       out_features=output_shape)
         )
 
     def forward(self, x: torch.Tensor):
-        x = self.block_1(x)
+        x = self.conv_block_1(x)
         # print(x.shape)
-        x = self.block_2(x)
+        x = self.conv_block_2(x)
         # print(x.shape)
         x = self.classifier(x)
         # print(x.shape)
         return x
+        # return self.classifier(self.conv_block_2(self.conv_block_1(x))) # <- leverage the benefits of operator fusion
 
+# Create model and send it to the target device
 torch.manual_seed(42)
-model_2 = Cifar100Model(input_shape=3,
+model0 = CIFAR100_TinyVGG(
+    input_shape=3,
     hidden_units=10,
-    output_shape=len(classes)).to(device)
-model_2
+    output_shape=len(dataset.classes)).to(device)
+model0
 
-torch.manual_seed(42)
+def train_step(model: torch.nn.Module,
+               dataloader: torch.utils.data.DataLoader,
+               loss_fn: torch.nn.Module,
+               optimizer: torch.optim.Optimizer):
+    # Put model in train mode
+    model.train()
 
-# Create sample batch of random numbers with same size as image batch
-images = torch.randn(size=(32, 3, 32, 32)) # [batch_size, color_channels, height, width]
-test_image = images[0] # get a single image for testing
-print(f"Image batch shape: {images.shape} -> [batch_size, color_channels, height, width]")
-print(f"Single image shape: {test_image.shape} -> [color_channels, height, width]")
-print(f"Single image pixel values:\n{test_image}")
+    # Setup train loss and train accuracy values
+    train_loss, train_acc = 0, 0
 
-torch.manual_seed(42)
+    # Loop through data loader data batches
+    for batch, (X, y) in enumerate(dataloader):
+        # Send data to target device
+        X, y = X.to(device), y.to(device)
 
-# Create a convolutional layer with same dimensions as TinyVGG
-# (try changing any of the parameters and see what happens)
-conv_layer = nn.Conv2d(in_channels=3,
-                       out_channels=10,
-                       kernel_size=3,
-                       stride=1,
-                       padding=0) # also try using "valid" or "same" here
+        # 1. Forward pass
+        y_pred = model(X)
 
-# Pass the data through the convolutional layer
-conv_layer(test_image) # Note: If running PyTorch <1.11.0, this will error because of shape issues (nn.Conv.2d() expects a 4d tensor as input)
+        # 2. Calculate  and accumulate loss
+        loss = loss_fn(y_pred, y)
+        train_loss += loss.item()
 
-# Add extra dimension to test image
-test_image.unsqueeze(dim=0).shape
+        # 3. Optimizer zero grad
+        optimizer.zero_grad()
 
-# Pass test image with extra dimension through conv_layer
-conv_layer(test_image.unsqueeze(dim=0)).shape
+        # 4. Loss backward
+        loss.backward()
 
-torch.manual_seed(42)
-# Create a new conv_layer with different values (try setting these to whatever you like)
-conv_layer_2 = nn.Conv2d(in_channels=3, # same number of color channels as our input image
-                         out_channels=10,
-                         kernel_size=(5, 5), # kernel is usually a square so a tuple also works
-                         stride=2,
-                         padding=0)
+        # 5. Optimizer step
+        optimizer.step()
 
-# Pass single image through new conv_layer_2 (this calls nn.Conv2d()'s forward() method on the input)
-conv_layer_2(test_image.unsqueeze(dim=0)).shape
+        # Calculate and accumulate accuracy metric across all batches
+        y_pred_class = torch.argmax(torch.softmax(y_pred, dim=1), dim=1)
+        train_acc += (y_pred_class == y).sum().item()/len(y_pred)
 
-# Check out the conv_layer_2 internal parameters
-print(conv_layer_2.state_dict())
+    # Adjust metrics to get average loss and accuracy per batch
+    train_loss = train_loss / len(dataloader)
+    train_acc = train_acc / len(dataloader)
+    return train_loss, train_acc
 
-# Get shapes of weight and bias tensors within conv_layer_2
-print(f"conv_layer_2 weight shape: \n{conv_layer_2.weight.shape} -> [out_channels=10, in_channels=3, kernel_size=5, kernel_size=5]")
-print(f"\nconv_layer_2 bias shape: \n{conv_layer_2.bias.shape} -> [out_channels=10]")
+def test_step(model: torch.nn.Module,
+              dataloader: torch.utils.data.DataLoader,
+              loss_fn: torch.nn.Module):
+    # Put model in eval mode
+    model.eval()
 
-# Print out original image shape without and with unsqueezed dimension
-print(f"Test image original shape: {test_image.shape}")
-print(f"Test image with unsqueezed dimension: {test_image.unsqueeze(dim=0).shape}")
+    # Setup test loss and test accuracy values
+    test_loss, test_acc = 0, 0
 
-# Create a sample nn.MaxPoo2d() layer
-max_pool_layer = nn.MaxPool2d(kernel_size=2)
+    # Turn on inference context manager
+    with torch.inference_mode():
+        # Loop through DataLoader batches
+        for batch, (X, y) in enumerate(dataloader):
+            # Send data to target device
+            X, y = X.to(device), y.to(device)
 
-# Pass data through just the conv_layer
-test_image_through_conv = conv_layer(test_image.unsqueeze(dim=0))
-print(f"Shape after going through conv_layer(): {test_image_through_conv.shape}")
+            # 1. Forward pass
+            test_pred_logits = model(X)
 
-# Pass data through the max pool layer
-test_image_through_conv_and_max_pool = max_pool_layer(test_image_through_conv)
-print(f"Shape after going through conv_layer() and max_pool_layer(): {test_image_through_conv_and_max_pool.shape}")
+            # 2. Calculate and accumulate loss
+            loss = loss_fn(test_pred_logits, y)
+            test_loss += loss.item()
 
-torch.manual_seed(42)
-# Create a random tensor with a similiar number of dimensions to our images
-random_tensor = torch.randn(size=(1, 1, 2, 2))
-print(f"Random tensor:\n{random_tensor}")
-print(f"Random tensor shape: {random_tensor.shape}")
+            # Calculate and accumulate accuracy
+            test_pred_labels = test_pred_logits.argmax(dim=1)
+            test_acc += ((test_pred_labels == y).sum().item()/len(test_pred_labels))
 
-# Create a max pool layer
-max_pool_layer = nn.MaxPool2d(kernel_size=2) # see what happens when you change the kernel_size value
+    # Adjust metrics to get average loss and accuracy per batch
+    test_loss = test_loss / len(dataloader)
+    test_acc = test_acc / len(dataloader)
+    return test_loss, test_acc
 
-# Pass the random tensor through the max pool layer
-max_pool_tensor = max_pool_layer(random_tensor)
-print(f"\nMax pool tensor:\n{max_pool_tensor} <- this is the maximum value from random_tensor")
-print(f"Max pool tensor shape: {max_pool_tensor.shape}")
-
-# Setup loss and optimizer
-loss_fn = nn.CrossEntropyLoss()
-optimizer = torch.optim.SGD(params=model_2.parameters(),
-                             lr=0.1)
-
-torch.manual_seed(42)
 from tqdm.auto import tqdm
 
-# Measure time
+# 1. Take in various parameters required for training and test steps
+def train(model: torch.nn.Module,
+          train_dataloader: torch.utils.data.DataLoader,
+          test_dataloader: torch.utils.data.DataLoader,
+          optimizer: torch.optim.Optimizer,
+          loss_fn: torch.nn.Module = nn.CrossEntropyLoss(),
+          epochs: int = 5):
+
+    # 2. Create empty results dictionary
+    results = {"train_loss": [],
+        "train_acc": [],
+        "test_loss": [],
+        "test_acc": []
+    }
+
+    # 3. Loop through training and testing steps for a number of epochs
+    for epoch in tqdm(range(epochs)):
+        train_loss, train_acc = train_step(model=model,
+                                           dataloader=train_dataloader,
+                                           loss_fn=loss_fn,
+                                           optimizer=optimizer)
+        test_loss, test_acc = test_step(model=model,
+            dataloader=test_dataloader,
+            loss_fn=loss_fn)
+
+        # 4. Print out what's happening
+        print(
+            f"Epoch: {epoch+1} | "
+            f"train_loss: {train_loss:.4f} | "
+            f"train_acc: {train_acc:.4f} | "
+            f"test_loss: {test_loss:.4f} | "
+            f"test_acc: {test_acc:.4f}"
+        )
+
+        # 5. Update results dictionary
+        results["train_loss"].append(train_loss)
+        results["train_acc"].append(train_acc)
+        results["test_loss"].append(test_loss)
+        results["test_acc"].append(test_acc)
+
+    # 6. Return the filled results at the end of the epochs
+    return results
+
+# Set random seeds
+torch.manual_seed(42)
+torch.cuda.manual_seed(42)
+
+# Set number of epochs
+NUM_EPOCHS =10
+
+# Setup loss function and optimizer
+loss_fn = nn.CrossEntropyLoss()
+optimizer = torch.optim.Adam(params=model0.parameters(), lr=0.001)
+
+# Start the timer
 from timeit import default_timer as timer
-train_time_start_model_2 = timer()
+start_time = timer()
 
-# Train and test model
-epochs = 3
-for epoch in tqdm(range(epochs)):
-    print(f"Epoch: {epoch}\n---------")
-    train_step(data_loader=train_dataloader,
-        model=model_2,
-        loss_fn=loss_fn,
-        optimizer=optimizer,
-        accuracy_fn = accuracy_fn,
-        device=device
-    )
-    test_step(data_loader=test_dataloader,
-        model=model_2,
-        loss_fn=loss_fn,
-        accuracy_fn=accuracy_fn,
-        device=device
-    )
+# Train model_1
+model_1_results = train(model=model0,
+                        train_dataloader=train_dataloader_augmented,
+                        test_dataloader=test_dataloader_simple,
+                        optimizer=optimizer,
+                        loss_fn=loss_fn,
+                        epochs=NUM_EPOCHS)
 
-# train_time_end_model_2 = timer()
-# total_train_time_model_2 = print_train_time(start=train_time_start_model_2,
-#                                            end=train_time_end_model_2,
-#                                            device=device)
-
+# End the timer and print out how long it took
+end_time = timer()
+print(f"Total training time: {end_time-start_time:.3f} seconds")
